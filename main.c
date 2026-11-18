@@ -4,8 +4,32 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define PORT 8080
+
+void* handleClient(void* arg){
+    int client_socket = *((int *)arg);
+    free(arg);
+
+    pthread_detach(pthread_self());
+    
+    char buffer[1024] = {0};
+    ssize_t bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
+
+    if (bytes_read > 0) {
+        printf("--- Received Request ---\n%s\n", buffer);
+
+        const char *response = "HTTP/1.1 200 OK\r\n"
+                               "Content-Type: text/html; charset=UTF-8\r\n"
+                               "\r\n"
+                               "<html><body><h1>Hello from your Multi-Threaded C Server!</h1></body></html>";
+        write(client_socket, response, strlen(response));
+    }
+
+    close(client_socket);
+    return NULL;
+}
 
 int main() {
     int server_socket;
@@ -31,28 +55,37 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_socket, 5) < 0) {
+    if (listen(server_socket, 10) < 0) {
         perror("Socket listening failed");
         exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %d...\n", PORT);
+    printf("Multi-threaded server listening on port %d...\n", PORT);
 
     while (1) {
         struct sockaddr_in client_address;
         socklen_t client_addr_len = sizeof(client_address);
 
-        int client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_addr_len);
-        if (client_socket < 0) {
-            perror("Accepting client failed");
-            continue; 
+        int *client_socket_ptr = malloc(sizeof(int));
+        if (!client_socket_ptr) {
+            perror("Heap allocation failed");
+            continue;
         }
 
-        printf("New client connected!\n");
+        *client_socket_ptr = accept(server_socket, (struct sockaddr*)&client_address, &client_addr_len);
+        if (*client_socket_ptr < 0) {
+            perror("Accepting client failed");
+            free(client_socket_ptr);
+            continue;
+        }
 
-        // TODO: Handle client request / spawn thread here
+        pthread_t thread_id;
 
-        close(client_socket);
+        if (pthread_create(&thread_id, NULL, handleClient, client_socket_ptr) != 0) {
+            perror("Thread creation failed");
+            close(*client_socket_ptr);
+            free(client_socket_ptr);
+        }
     }
 
     close(server_socket);
