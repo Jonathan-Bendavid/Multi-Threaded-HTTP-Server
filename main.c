@@ -5,8 +5,98 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #define PORT 8080
+
+char** parseRequest(char* request) {
+    if (!request || strlen(request) == 0 || request[0] == ' ') {
+        fprintf(stderr, "Invalid request line\n");
+        return NULL;
+    }
+
+    size_t method_len = strcspn(request, " ");
+    char* method = malloc(method_len + 1);
+    if (!method) return NULL;
+    
+    memcpy(method, request, method_len);
+    method[method_len] = '\0'; 
+
+    char* ptr = request + method_len;
+    while (*ptr == ' ') ptr++;
+
+    size_t path_len = strcspn(ptr, " \r\n");
+    char* path = malloc(path_len + 1);
+    if (!path) {
+        free(method);
+        return NULL;
+    }
+
+    memcpy(path, ptr, path_len);
+    path[path_len] = '\0';
+
+    char** parsed = malloc(2 * sizeof(char*));
+    if (!parsed) {
+        free(method);
+        free(path);
+        return NULL;
+    }
+
+    parsed[0] = method;
+    parsed[1] = path;
+
+    return parsed;
+}
+
+void handleGETRequest(int client_socket, const char* path){
+    char file_path[1024];
+
+    if(strcmp(path, "/") == 0){
+        snprintf(file_path, sizeof(file_path), "www/index.html");
+    }
+    else{
+        snprintf(file_path, sizeof(file_path), "www%s", path);
+    }
+
+    struct stat st;
+
+    if(stat(file_path, &st) < 0 || S_ISDIR(st.st_mode)){
+        const char* body = "<html><body><h1>404 Not Found</h1></body></html>";
+        char header[512];
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 404 Not Found\r\n"
+                 "Content-Type: text/html; charset=UTF-8\r\n"
+                 "Content-Length: %zu\r\n"
+                 "\r\n", strlen(body));
+        
+        write(client_socket, header, strlen(header));
+        write(client_socket, body, strlen(body));
+        return;
+    }
+
+    FILE *file = fopen(file_path, "rb");
+    if (!file) {
+        perror("Failed to open file");
+        return;
+    }
+
+    char header[512];
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: text/html; charset=UTF-8\r\n"
+             "Content-Length: %ld\r\n"
+             "\r\n", st.st_size);
+    write(client_socket, header, strlen(header));
+
+    char buffer[4096];
+    size_t bytes_read;
+    while((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0){
+        write(client_socket, buffer, bytes_read);
+    }
+    
+    fclose(file);
+}
 
 void* handleClient(void* arg){
     int client_socket = *((int *)arg);
@@ -14,17 +104,24 @@ void* handleClient(void* arg){
 
     pthread_detach(pthread_self());
     
-    char buffer[1024] = {0};
+    char buffer[2048] = {0};
     ssize_t bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
 
     if (bytes_read > 0) {
         printf("--- Received Request ---\n%s\n", buffer);
 
-        const char *response = "HTTP/1.1 200 OK\r\n"
-                               "Content-Type: text/html; charset=UTF-8\r\n"
-                               "\r\n"
-                               "<html><body><h1>Hello from your Multi-Threaded C Server!</h1></body></html>";
-        write(client_socket, response, strlen(response));
+        char** parsed = parseRequest(buffer);
+        if (parsed) {
+            printf("Method: %s | Path: %s\n", parsed[0], parsed[1]);
+            
+            if(strcmp(parsed[0], "GET") == 0){
+                handleGETRequest(client_socket, parsed[1]);
+            }
+
+            free(parsed[0]);
+            free(parsed[1]);
+            free(parsed);
+        }
     }
 
     close(client_socket);
